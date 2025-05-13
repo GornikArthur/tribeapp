@@ -1,6 +1,6 @@
 from models import async_session, User, Interest, UserLike, Location
 from models import LocationModel, InterestModel, FullInterestModel, UserModel, UserUpdateModel
-from sqlalchemy import select, update, delete
+from sqlalchemy import select, update, delete, and_, not_, exists
 from fastapi import HTTPException
 
 def generate_myuser_data(user, location=None, interests=None):
@@ -115,21 +115,46 @@ async def remove_interest(interest_id: int):
             await session.flush()
             await session.commit()
         return interest_to_delete
-    
-async def get_user_by_id(current_id: int):
+
+async def get_user_by_id(current_id: int, telegram_link: str):
     async with async_session() as session:
-        stmt = select(User).where(User.User_id > current_id).order_by(User.User_id.asc()).limit(1)
+        # Сначала получаем все ID пользователей, которых текущий пользователь лайкнул
+        liked_users = (
+            await session.scalars(
+                select(UserLike.Liked_id).where(UserLike.Liker_id == current_id)
+            )
+        ).all()
+
+        # Создаем подзапрос, который проверяет, не лайкнул ли текущий пользователь этого пользователя
+        stmt = (
+            select(User)
+            .where(
+                and_(
+                    User.User_id > current_id,
+                    User.TelegramLink != telegram_link,
+                    not_(User.User_id.in_(liked_users))  # Проверка, что пользователь не в списке лайкнутых
+                )
+            )
+            .order_by(User.User_id.asc())
+            .limit(1)
+        )
+
         result = await session.execute(stmt)
         user = result.scalars().first()
+
         if user is None:
             raise HTTPException(status_code=404, detail="User not found")
+
+        # Получаем интересы и местоположение пользователя
         interests = (await session.scalars(select(Interest).where(Interest.User_id == user.User_id))).all()
         location = await session.scalar(select(Location).where(Location.Location_id == user.Location_id))
+
         return generate_myuser_data(
             user=user,
             location=location,
             interests=interests,
         )
+
 
 async def get_my_likes(my_user):
     async with async_session() as session:
